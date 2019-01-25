@@ -1,11 +1,13 @@
 import win32serviceutil
 import win32service
 import win32event
+import win32gui
+import win32process, win32api, win32con
 import servicemanager
 import socket
 import random
-from pathlib import Path
-from time import sleep
+import os
+import time
 
 
 class AppServerSvc (win32serviceutil.ServiceFramework):
@@ -47,13 +49,28 @@ class AppServerSvc (win32serviceutil.ServiceFramework):
     def stop(self):
         self.isrunning = False
 
-    def main(self):    
+    def main(self):
+        f = open(f'c:\\test\\active_window.txt', 'w', encoding='utf-8')
         while self.isrunning:
-            random.seed()
-            x = random.randint(1, 100000)
-            Path(f'c:\\test\\{x}.txt').touch()
-            sleep(5)
+            # Get the process for the currently focused window
+            whnd = win32gui.GetForegroundWindow()
+            window_text = win32gui.GetWindowText(whnd)
+            (_, pid) = win32process.GetWindowThreadProcessId(whnd)
+            handle = win32api.OpenProcess(win32con.PROCESS_ALL_ACCESS, False, pid)
+
+            # Get the executable name of this process
+            filename = win32process.GetModuleFileNameEx(handle, 0)
+            _, exe = os.path.split(filename)
+
+            # Write timestamp, title text, and executable name
+            current_time = time.time()
+            f.write(f'{current_time};{window_text};{exe}\n')
+            f.flush()
+
+            # Sleep for a bit
+            time.sleep(1)
         pass
+        f.close()
 
 if __name__ == '__main__':
     win32serviceutil.HandleCommandLine(AppServerSvc)
