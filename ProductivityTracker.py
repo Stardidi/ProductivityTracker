@@ -1,13 +1,34 @@
+# Service
 import win32serviceutil
 import win32service
 import win32event
 import win32gui
-import win32process, win32api, win32con
 import servicemanager
 import socket
+
+# Get current process
+import win32process, win32api, win32con
+
+# Sheets
+from googleapiclient.discovery import build
+from httplib2 import Http
+from oauth2client import file, client, tools
+
+# UI
+import PySimpleGUI as sg      
+
+# General
 import random
 import os
-import time
+import time, datetime
+
+# If modifying these scopes, delete the file token.json.
+SCOPES = 'https://www.googleapis.com/auth/spreadsheets'
+
+# The ID and range of a sample spreadsheet.
+cSpreadSheetID = '1645s8DXpXflurtXb8OFOe1gFGiDtjiTOiPiTFIRAEBM'
+cProductivityTable = 'Productivity!A1:B'
+cFocusedProgram = 'FocusedProgram!A1:D'
 
 
 class AppServerSvc (win32serviceutil.ServiceFramework):
@@ -46,11 +67,19 @@ class AppServerSvc (win32serviceutil.ServiceFramework):
     def start(self):
         self.isrunning = True
 
+        store = file.Storage('D:\\Perforce\\David150009\\Y4\\ProductivityTracker\\token.json') #FIXME Find a way to make this file available to the service
+        creds = store.get()
+        if not creds or creds.invalid:
+            flow = client.flow_from_clientsecrets('D:\\Perforce\\David150009\\Y4\\ProductivityTracker\\credentials.json', SCOPES) #FIXME Find a way to make this file available to the service
+            creds = tools.run_flow(flow, store)
+        service = build('sheets', 'v4', http=creds.authorize(Http()))
+        self.spreadsheets = service.spreadsheets()
+
     def stop(self):
         self.isrunning = False
 
     def main(self):
-        f = open(f'c:\\test\\active_window.txt', 'w', encoding='utf-8')
+        last_popup = time.time()
         while self.isrunning:
             # Get the process for the currently focused window
             whnd = win32gui.GetForegroundWindow()
@@ -62,15 +91,41 @@ class AppServerSvc (win32serviceutil.ServiceFramework):
             filename = win32process.GetModuleFileNameEx(handle, 0)
             _, exe = os.path.split(filename)
 
-            # Write timestamp, title text, and executable name
-            current_time = time.time()
-            f.write(f'{current_time};{window_text};{exe}\n')
-            f.flush()
+            # Write timestamp, title text and exectuble name to sheet
+            values = [ [ str(datetime.datetime.now()), window_text, exe] ]
+            body = {
+                "majorDimension": "ROWS",
+                "values": values
+            }
+            result = self.spreadsheets.values().append(spreadsheetId=cSpreadSheetID, range=cFocusedProgram, valueInputOption='USER_ENTERED', body=body).execute()
+            print('{0} cells updated.'.format(result.get('updates').get('updatedCells')))
+
+
+            if time.time() - last_popup > 5:
+                # Create layout for window
+                layout = [ [sg.Text('How productive do you feel?')], 
+                            [ sg.Button(f'{x}') for x in range(1,11)]]
+
+                # Show window and read output
+                #TODO Wait nonblocking for the result
+                window = sg.Window('Productivity Tracker').Layout(layout)
+                event, values = window.Read()
+                window.Close()
+
+                # Write timestamp and productivity to sheet
+                values = [ [ str(datetime.datetime.now()), str(event)] ]
+                body = {
+                    "majorDimension": "ROWS",
+                    "values": values
+                }
+                result = self.spreadsheets.values().append(spreadsheetId=cSpreadSheetID, range=cProductivityTable, valueInputOption='USER_ENTERED', body=body).execute()
+                print('{0} cells updated.'.format(result.get('updates').get('updatedCells')))
+
+                # Update last pop up time
+                last_popup = time.time()
 
             # Sleep for a bit
             time.sleep(1)
-        pass
-        f.close()
 
 if __name__ == '__main__':
     win32serviceutil.HandleCommandLine(AppServerSvc)
