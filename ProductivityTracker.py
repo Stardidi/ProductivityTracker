@@ -19,6 +19,7 @@ from oauth2client import file, client, tools
 
 # UI
 import PySimpleGUI as sg      
+import SysTrayIcon, WindowsBalloonTip
 
 # General
 import random
@@ -33,6 +34,7 @@ cSpreadSheetID          = '1645s8DXpXflurtXb8OFOe1gFGiDtjiTOiPiTFIRAEBM'
 cProductivityTable      = 'Productivity!A1:B'
 cFocusedProgramTable    = 'FocusedProgram!A1:C'
 cInputTable             = 'Input!A1:C'
+cDistractionsTable      = 'Distractions!A1:B'
 
 cUpdateInterval =   1
 cSendInterval   =   5
@@ -83,12 +85,16 @@ class AppServerSvc (win32serviceutil.ServiceFramework):
         self.keyboard_presses += 1
 
 
-    def start(self):
+    def start(self):               
+        # Set current working dir to origin of python file
+        source_path, _ = os.path.split(__file__)
+        os.chdir(source_path)
+
         # Set up spreadsheet service
-        store = file.Storage('D:\\Perforce\\David150009\\Y4\\ProductivityTracker\\token.json') #FIXME Find a way to make this file available to the service
+        store = file.Storage('token.json')
         creds = store.get()
         if not creds or creds.invalid:
-            flow = client.flow_from_clientsecrets('D:\\Perforce\\David150009\\Y4\\ProductivityTracker\\credentials.json', SCOPES) #FIXME Find a way to make this file available to the service
+            flow = client.flow_from_clientsecrets('credentials.json', SCOPES)
             creds = tools.run_flow(flow, store)
         service = build('sheets', 'v4', http=creds.authorize(Http()))
         self.spreadsheets = service.spreadsheets()
@@ -97,11 +103,12 @@ class AppServerSvc (win32serviceutil.ServiceFramework):
         self.batches = {}
         self.last_batch_send = 0
         self.last_popup = time.time()
-        self.last_input_update = time.time()
+        self.last_update = time.time()
         self.mouse_moves = 0
         self.mouse_clicks = 0
         self.mouse_scrolls = 0
         self.keyboard_presses = 0
+        self.icon = None
 
         # Register mouse and keyboard listeners
         self.mouse_listener = mouse.Listener(on_move=self.on_mouse_move, on_click=self.on_mouse_click, on_scroll=self.on_mouse_scroll)    # Should we exclude mouse moves? 
@@ -149,68 +156,101 @@ class AppServerSvc (win32serviceutil.ServiceFramework):
         # Reset last send time
         self.last_batch_send = time.time()
 
+    def OpenProductivityWindow(self):
+        print("Spawning window")
+        # Create layout for window
+        layout = [ [sg.Text('How productive do you feel?')], 
+                    [ sg.Button(f'{x}') for x in range(1,11)]]
 
+        # Show window and read output
+        #TODO Wait nonblocking for the result
+        window = sg.Window('Productivity Tracker').Layout(layout)
+        event, values = window.Read()
+        window.Close()
+
+        # Write timestamp and productivity to sheet
+        values = [ str(datetime.datetime.now()), str(event)]
+        self.QueueRow(cProductivityTable, values)
+
+        # Update last pop up time
+        self.last_popup = time.time()
+
+    def ReportDistraction(self):
+        # Write timestamp and productivity to sheet
+        values = [ str(datetime.datetime.now())]
+        self.QueueRow(cDistractionsTable, values)
+
+        self.icon.show_notification('Reported distraction!')
+ 
 
     def main(self):
+        def icon_stop(inSysTrayIcon):
+            self.stop()
+        def icon_open(inSysTrayIcon):
+            self.OpenProductivityWindow()
+        def icon_report_distraction(inSysTrayIcon):
+            self.ReportDistraction()
+        def icon_report_productivity(inSysTrayIcon):
+            self.OpenProductivityWindow()
+        
+        menu_options = (('Open', None, icon_open),
+                        ('Report Productivity', None, icon_report_productivity),
+                        ('Report Distraction', None, icon_report_distraction))
+        self.icon = SysTrayIcon.SysTrayIcon('ProductivityTracker.ico', 'Productivity Tracker', menu_options, on_quit=icon_stop, blocking=False)
+
+        self.icon.show_notification("Started!")
+        
+        # Main loop
         while self.isrunning:
-            try:
-                # Get the process for the currently focused window
-                whnd = win32gui.GetForegroundWindow()
-                window_text = win32gui.GetWindowText(whnd)
-                (_, pid) = win32process.GetWindowThreadProcessId(whnd)
-                handle = win32api.OpenProcess(win32con.PROCESS_ALL_ACCESS, False, pid)
-
-                # Get the executable name of this process
-                filename = win32process.GetModuleFileNameEx(handle, 0)
-                _, exe = os.path.split(filename)
-            except Exception:
-                # We might sometimes select something that does not have a process. Just ignore this event then
-                filename = None
-                exe = None
-
-            # Write timestamp, title text and exectuble name to sheet
-            values = [ str(datetime.datetime.now()), window_text, exe]
-            self.QueueRow(cFocusedProgramTable, values)
-
-
-            # Write timestamp, mouse and keyboard input to sheet
-            elapsed_time = time.time() - self.last_input_update
-            values = [    str(datetime.datetime.now()), 
-                            self.mouse_moves / elapsed_time, 
-                            self.mouse_clicks / elapsed_time, 
-                            self.mouse_scrolls / elapsed_time, 
-                            self.keyboard_presses / elapsed_time]
-            self.QueueRow(cInputTable, values)
-            self.last_input_update = time.time()
-            self.mouse_moves = 0
-            self.mouse_clicks = 0
-            self.mouse_scrolls = 0
-            self.keyboard_presses = 0
-
-            if time.time() - self.last_popup > 5:
-                print("Spawning window")
-                # Create layout for window
-                layout = [ [sg.Text('How productive do you feel?')], 
-                            [ sg.Button(f'{x}') for x in range(1,11)]]
-
-                # Show window and read output
-                #TODO Wait nonblocking for the result
-                window = sg.Window('Productivity Tracker').Layout(layout)
-                event, values = window.Read()
-                window.Close()
-
-                # Write timestamp and productivity to sheet
-                values = [ str(datetime.datetime.now()), str(event)]
-                self.QueueRow(cProductivityTable, values)
-
-                # Update last pop up time
-                self.last_popup = time.time()
-
-            # Send any batches if needed
-            self.UpdateBatches()
+            # Manually pump messages for the tray icon
+            win32gui.PumpWaitingMessages()
             
-            # Sleep for a bit
-            time.sleep(cUpdateInterval)
+            # Sleep for a bit, running at roughly 30hz
+            time.sleep(0.033)
+            
+            # Update at a lower interval than the message pump
+            if time.time() - self.last_update > cUpdateInterval:
+                try:
+                    # Get the process for the currently focused window
+                    whnd = win32gui.GetForegroundWindow()
+                    window_text = win32gui.GetWindowText(whnd)
+                    (_, pid) = win32process.GetWindowThreadProcessId(whnd)
+                    handle = win32api.OpenProcess(win32con.PROCESS_ALL_ACCESS, False, pid)
+
+                    # Get the executable name of this process
+                    filename = win32process.GetModuleFileNameEx(handle, 0)
+                    _, exe = os.path.split(filename)
+                except Exception:
+                    # We might sometimes select something that does not have a process. Just ignore this event then
+                    filename = None
+                    exe = None
+
+                # Write timestamp, title text and exectuble name to sheet
+                values = [ str(datetime.datetime.now()), window_text, exe]
+                self.QueueRow(cFocusedProgramTable, values)
+
+
+                # Write timestamp, mouse and keyboard input to sheet
+                elapsed_time = time.time() - self.last_update
+                values = [    str(datetime.datetime.now()), 
+                                self.mouse_moves / elapsed_time, 
+                                self.mouse_clicks / elapsed_time, 
+                                self.mouse_scrolls / elapsed_time, 
+                                self.keyboard_presses / elapsed_time]
+                self.QueueRow(cInputTable, values)
+                self.mouse_moves = 0
+                self.mouse_clicks = 0
+                self.mouse_scrolls = 0
+                self.keyboard_presses = 0
+
+                if time.time() - self.last_popup > 10000:
+                    self.OpenProductivityWindow()
+
+                # Send any batches if needed
+                self.UpdateBatches()
+
+                # Update timestamp
+                self.last_update = time.time()
 
 if __name__ == '__main__':
     win32serviceutil.HandleCommandLine(AppServerSvc)
